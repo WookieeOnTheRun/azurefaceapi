@@ -2,9 +2,12 @@
 # import packages #
 ###################
 
-import os, requests, uuid, json
+import os, requests, uuid, json, time
 
-import PIL, face_recognition # imported for potential long-term offline facial detection request
+from PIL import Image, ImageDraw
+from io import BytesIO
+
+# will need offline facial recognition for phase 2
 
 from azure.cognitiveservices.vision.face import FaceClient
 from azure.cognitiveservices.vision.face.models import TrainingStatusType, Person, QualityForRecognition
@@ -13,7 +16,7 @@ from msrest.authentication import CognitiveServicesCredentials
 
 from azure.storage.blob import BlobServiceClient, ContainerClient, BlobClient
 
-from azure.cosmos import exceptions, CosmosClient, PartitionKey
+# from azure.cosmos import exceptions, CosmosClient, PartitionKey
 
 ##############################
 # define important variables #
@@ -30,10 +33,9 @@ saContainer = "images"
 # SAS expires in 30 days from creation ( expiration date : 12-July-2022 )
 saSasKey = ""
 
-cosmosEndpoint = ""
-cosmosRwKey = ""
-cosmosDb = "images"
-cosmosCont = "metadata"
+# first pass of images to match - list of face id's
+facesDetected = []
+facesToCompare = []
 
 ######################
 # create connections #
@@ -66,12 +68,13 @@ for blob in blobList :
 
         try :
 
-            print( "Passing to API : ", blobUrl )
+            print( "Passing to API : ", ( saUrl + saContainer + "/" + blob[ "name" ] ) )
 
             detectedFaces = faceClient.face.detect_with_url( 
                 url = blobUrl, 
+                detection_model = "detection_03" ,
                 return_face_landmarks = True, 
-                return_face_attributes = [ "blur", "noise", "exposure", "age", "gender", "hair", "accessories", "facialHair" ],
+                # return_face_attributes = [ "blur", "noise", "exposure", "age", "gender", "hair", "accessories", "facialHair" ],
                 recognition_model = "recognition_04" 
             )
 
@@ -92,10 +95,9 @@ for blob in blobList :
                 # get face id
                 currFaceId = face.face_id
 
-                # ID column required for CosmosDB container using SQL API
-                jsonOutput[ "id" ] = currFaceId
+                # append to batch list of faces detected for similarity comparison
+                facesDetected.append( currFaceId )              
 
-                # FaceID - being used as partition key
                 jsonOutput[ "faceID" ] = currFaceId
                 jsonOutput[ "imageFile" ] = ( saUrl + saContainer + "/" + blob[ "name" ] )
                 
@@ -111,7 +113,8 @@ for blob in blobList :
                 jsonOutput[ "imageRight" ] = ( faceRectangle.left + faceRectangle.width )
                 jsonOutput[ "imageBottom" ] = ( faceRectangle.top + faceRectangle.height )
 
-                # get estimated age
+                # attributes below no longer valid using most current detection model
+                """# get estimated age
                 approxAgeOfFace = face.face_attributes.age
 
                 jsonOutput[ "approximateAge" ] = approxAgeOfFace
@@ -177,92 +180,75 @@ for blob in blobList :
                         hairColor = colorItem.color[ : ]
                         hcElement = hairColor + "-confidence"
 
-                        jsonOutput[ hcElement ] = colorItem.confidence
+                        jsonOutput[ hcElement ] = colorItem.confidence"""
 
                 # print( jsonOutput )
-                # print( "" )
+                # print( "" )                
 
-                #####################################
-                # write output to CosmosDB instance #
-                #####################################
-                # cosmosJson = json.dumps( jsonOutput )
+                # display highlighted face within image - draw rectangle around face
+                response = requests.get( blobUrl )
+                
+                img = Image.open( BytesIO( response.content ) )
 
-                # create CosmosDB connection instance
-                # instance
-                cosmosConn = CosmosClient( cosmosEndpoint, credential = cosmosRwKey )
-                # database
-                cosmosDbConn = cosmosConn.get_database_client( cosmosDb )
-                # container
-                cosmosContConn = cosmosDbConn.get_container_client( container = cosmosCont )
+                draw = ImageDraw.Draw( img )
 
-                # write item to container - accepts Python Dictionary
-                try :
+                draw.rectangle( 
+                    ( 
+                        ( faceRectangle.left, faceRectangle.top ), 
+                        ( 
+                            ( faceRectangle.left + faceRectangle.width ), 
+                            ( faceRectangle.top + faceRectangle.height ) 
+                        ) 
+                    ), outline = "red" )
 
-                    cosmosContConn.create_item( body = jsonOutput )
+                img.show()                
 
-                    print( "Successfully addded item to CosmosDB..." )
-                    print( "" )
+                img.close()
 
-                except Exception as CDbEx :
-
-                    print( "Exception generated writing to CosmosDB: ", CDbEx )
-                    print( "" )
-
-                #########################################################################
-                # create person group for comparison - filter for :                     #
-                #   * not current face id                                               #
-                #   * matching gender                                                   #
-                # filtering within captured json results for :                          #
-                #   * approximate age within 5 years                                    #                
-                #   * matching approximate hair color within 10% confidence score match #
-                #########################################################################
-                matchQuery = 'select * from metadata x where x.faceID != "' + currFaceId + '" and x.approximateGender = "' + approxGender + '"'
-
-                # first pass of images to match
-                imagesToMatch = cosmosContConn.query_items(
-                    query = matchQuery ,
-                    enable_cross_partition_query = True
-                )
-
-                for image in imagesToMatch :
-
-                    jsonImageInfo = json.dumps( image )
-                    # print( jsonImageInfo )
-
-                    # load into Python dictonary to allow search
-                    imageJsonToDict = json.loads( jsonImageInfo )
-
-                    # check if the determined age is within 5 years
-                    if ( -5 <= ( approxAgeOfFace - imageJsonToDict[ "approximateAge" ] )  <= 5 ) :
-
-                        # check if confidence score of hair color is within 10% difference
-                        hairColorElementList = [ "black-confidence", "brown-confidence", "red-confidence", "blonde-confidence", "gray-confidence", "other-confidence" ]
-
-                        for hairColor in hairColorElementList :
-
-                            if hairColor in imageJsonToDict.keys() :
-
-                                low = imageJsonToDict[ hairColor ] * 0.9
-                                high = imageJsonToDict[ hairColor ] * 1.1
-
-                                if low <= jsonOutput[ hairColor ] <= high :
-
-                                    # add image to PersonGroup for matching
-                                    print( "Adding image to PersonGroup..." )
-
-                                else :
-
-                                    pass
-
-                    else :
-
-                        pass
 
         except Exception as Ex :
 
             print( "Exception Generated: ", Ex )
-            print( "" )
+            print( "" )    
 
     else :
 
         print( "Unsupported File Type for ", blob[ "name" ] )
+
+#####################################################################################################################
+# face is detected - json output created                                                                            #
+# loop back through images with detected faces                                                                      #
+# compare for possible match                                                                                        #
+#   1. create list of detected face id's                                                                            #
+#   2. any 'similars' detected?                                                                                     #
+#####################################################################################################################
+
+for singleFace in facesDetected :
+
+    # pass
+
+    facesToCompare = facesDetected.pop( singleFace )
+
+    # complete similarity check
+    similarFaces = faceClient.face.find_similar( singleFace, facesToCompare )
+
+    if similarFaces :
+
+        # pass
+        print( "Similar faces detected..." )
+
+        for simiarFace in similarFaces :
+
+            # if any matches are detected :
+            #   a. check for an existing FaceGroup with a potential match
+            #   b. if no FaceGroups exist with potential match, create new FaceGroup with detected matches
+            pass
+        
+            
+
+    else :
+
+        print( "No matches detected..." )
+
+    # empty list and start over
+    facesToCompare = []
