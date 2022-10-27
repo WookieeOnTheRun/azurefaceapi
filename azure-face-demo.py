@@ -2,21 +2,17 @@
 # import packages #
 ###################
 
-import os, requests, uuid, json, time
+import os, requests, uuid, datetime, sys, time
 
 from PIL import Image, ImageDraw
 from io import BytesIO
-
-# will need offline facial recognition for phase 2
 
 from azure.cognitiveservices.vision.face import FaceClient
 from azure.cognitiveservices.vision.face.models import TrainingStatusType, Person, QualityForRecognition
 
 from msrest.authentication import CognitiveServicesCredentials
 
-from azure.storage.blob import BlobServiceClient, ContainerClient, BlobClient
-
-# from azure.cosmos import exceptions, CosmosClient, PartitionKey
+from azure.storage.blob import BlobServiceClient, BlobClient
 
 ##############################
 # define important variables #
@@ -30,18 +26,56 @@ cogSvcSubKey = ""
 saUrl = ""
 saContainer = "images"
 
-# SAS expires in 30 days from creation ( expiration date : 12-July-2022 )
+# SAS expires in 30 days from creation ( expiration date : 23-Nov-2022 )
 saSasKey = ""
 
 # first pass of images to match - list of face id's
-facesDetected = []
+facesDetected = {}
 facesToCompare = []
+
+######################
+# create function(s) #
+######################
+
+# function to generate new PersonID
+def fnCreatePersonID() :
+    
+    # add newly identified face to new face group
+    currDate = datetime.datetime.now()
+    currYear = str( currDate.year )
+    currMonth = OneOrTwo( currDate.month )
+    currDay = OneOrTwo( currDate.day )
+    currHour = OneOrTwo( currDate.hour )
+    currMinute = OneOrTwo( currDate.minute )
+    currSecond = OneOrTwo( currDate.second )
+    
+    tempPersonId = "personId-" + currYear + currMonth + currDay + "-" + currHour + currMinute + currSecond
+    
+    return tempPersonId
+
+# lambda function for use when building person id's
+OneOrTwo = lambda x : "0" + str( x ) if ( x < 10 ) else str( x )
 
 ######################
 # create connections #
 ######################
 
 faceClient = FaceClient( cogSvcEndpoint, CognitiveServicesCredentials( cogSvcSubKey ) )
+
+# clean up any created persongroups if used for testing
+# get existing largefacegroups, clean up if needed ( for testing )
+
+listPersonGroups = faceClient.person_group.list()
+
+cleanUp = input( "Enter Y or N to delete any created person groups : " )
+
+if cleanUp.upper() == "Y" :
+
+    for persongroup in listPersonGroups :
+
+        print( "Attempting to delete existing person group: ", str( persongroup.person_group_id ) )
+
+        faceClient.person_group.delete( persongroup.person_group_id )
 
 blobConn = BlobServiceClient( account_url = saUrl, credential = saSasKey )
 
@@ -65,6 +99,10 @@ for blob in blobList :
         blobUrl = saUrl + saContainer + "/" + blob[ "name" ] + saSasKey
 
         blobClientConn = BlobClient.from_blob_url( blobUrl )
+        
+        #######################################################
+        # begin face detection for supported image file types #
+        #######################################################
 
         try :
 
@@ -72,10 +110,10 @@ for blob in blobList :
 
             detectedFaces = faceClient.face.detect_with_url( 
                 url = blobUrl, 
-                detection_model = "detection_03" ,
+                # detection_model = "detection_04" ,
                 return_face_landmarks = True, 
                 # return_face_attributes = [ "blur", "noise", "exposure", "age", "gender", "hair", "accessories", "facialHair" ],
-                recognition_model = "recognition_04" 
+                recognition_model = "recognition_04"
             )
 
             # print( detectedFaces )
@@ -86,20 +124,11 @@ for blob in blobList :
 
             for face in detectedFaces :
 
-                # empty dictionary to be generated into JSON output
-                jsonOutput = {}
-
-                # print( face.face_attributes )
-                # print( face.face_attributes.hair.hair_color[ 0 ] )
-
                 # get face id
                 currFaceId = face.face_id
 
-                # append to batch list of faces detected for similarity comparison
-                facesDetected.append( currFaceId )              
-
-                jsonOutput[ "faceID" ] = currFaceId
-                jsonOutput[ "imageFile" ] = ( saUrl + saContainer + "/" + blob[ "name" ] )
+                # build string of URL for image location
+                currFaceImg = ( saUrl + saContainer + "/" + blob[ "name" ] )
                 
                 # print( "Face ID: ", currFaceId )
                 # print( "" )
@@ -108,82 +137,18 @@ for blob in blobList :
                 # print( face.face_rectangle )
                 faceRectangle = face.face_rectangle
 
-                jsonOutput[ "imageLeft" ] = faceRectangle.left
-                jsonOutput[ "imageTop" ] = faceRectangle.top
-                jsonOutput[ "imageRight" ] = ( faceRectangle.left + faceRectangle.width )
-                jsonOutput[ "imageBottom" ] = ( faceRectangle.top + faceRectangle.height )
-
-                # attributes below no longer valid using most current detection model
-                """# get estimated age
-                approxAgeOfFace = face.face_attributes.age
-
-                jsonOutput[ "approximateAge" ] = approxAgeOfFace
-
-                # print( "Detected Age: ", approxAgeOfFace )
-                # print( "" )
-
-                # get gender
-                approxGender = face.face_attributes.gender[ : ]
-
-                jsonOutput[ "approximateGender" ] = approxGender
-
-                # print( "Detected Gender: ", approxGender )
-                # print( "" )
-
-                # any accessories detected, including eyewear
-                jsonOutput[ "detectedAccessories" ] = {}
-
-                if len( face.face_attributes.accessories ) > 0 :
-
-                    accessoryList = face.face_attributes.accessories
-
-                    for accessory in accessoryList :
-
-                        accDetails = {}
-
-                        accId = "accId-" + str( uuid.uuid4() )
-
-                        # accDetails[ "accesssoryID" ] = accId
-
-                        # print( "Accessory Detected: ", accessory.type[ : ], "with confidence score of: ", accessory.confidence )
-                        # print( type( accessory.type ) )
-
-                        accDetails[ "type" ] = accessory.type[ : ]
-                        accDetails[ "confidence" ] = accessory.confidence
-
-                        jsonOutput[ "detectedAccessories" ][ accId ] = accDetails
-
-                    # print( "" )
-
-                # get facial hair
-                facialHair = face.face_attributes.facial_hair
-
-                # print( "Detected Facial Hair: ", facialHair )
-                # print( "Moustache Confidence Score: ", facialHair.moustache )
-                # print( "Beard Confidence Score: ", facialHair.beard )
-                # print( "Sideburns Confidence Score: ", facialHair.sideburns )
-                # print( "" )
-
-                jsonOutput[ "moustacheConfidence" ] = facialHair.moustache
-                jsonOutput[ "beardConfidence" ] = facialHair.beard
-                jsonOutput[ "sideburnsConfidence" ] = facialHair.sideburns
+                currFaceImgLeft = faceRectangle.left
+                currFaceImgTop = faceRectangle.top
+                currFaceImgRight = ( faceRectangle.left + faceRectangle.width )
+                currFaceImgBottom = ( faceRectangle.top + faceRectangle.height )
                 
-                # return hair color items
-                hairColorList = face.face_attributes.hair.hair_color
-
-                for colorItem in hairColorList :
-
-                    # print( colorItem )
-
-                    if colorItem.confidence >= 0.5 :
-
-                        hairColor = colorItem.color[ : ]
-                        hcElement = hairColor + "-confidence"
-
-                        jsonOutput[ hcElement ] = colorItem.confidence"""
-
-                # print( jsonOutput )
-                # print( "" )                
+                # add nested dictionary item for detected faceid, url and coordinates
+                facesDetected[ currFaceId ] = {}
+                facesDetected[ currFaceId ][ "URL" ] = currFaceImg
+                facesDetected[ currFaceId ][ "ImageLeft" ] = currFaceImgLeft
+                facesDetected[ currFaceId ][ "ImageTop"] = currFaceImgTop
+                facesDetected[ currFaceId ][ "ImageRight" ] = currFaceImgRight
+                facesDetected[ currFaceId ][ "ImageBottom" ] = currFaceImgBottom
 
                 # display highlighted face within image - draw rectangle around face
                 response = requests.get( blobUrl )
@@ -215,40 +180,218 @@ for blob in blobList :
 
         print( "Unsupported File Type for ", blob[ "name" ] )
 
-#####################################################################################################################
-# face is detected - json output created                                                                            #
-# loop back through images with detected faces                                                                      #
-# compare for possible match                                                                                        #
-#   1. create list of detected face id's                                                                            #
-#   2. any 'similars' detected?                                                                                     #
-#####################################################################################################################
+#################################################
+# face is detected - json output created        #
+# loop back through images with detected faces  #
+# compare for possible match                    #
+#   1. create list of detected face id's        #
+#   2. any 'similars' detected?                 #
+#################################################
+# get existing facegroups ( no large person groups created in this demo )
 
-for singleFace in facesDetected :
+listFaceGroups = faceClient.person_group.list()
+
+# create single list of FaceGroups and LargeFaceGroups to loop through
+combinedFaceGroups = []
+
+for fg in listFaceGroups :
+    
+    combinedFaceGroups.append( fg.person_group_id )
+
+# print( "Detected Faces : ", facesDetected )
+for dFace in facesDetected :
+    
+    print( "Detected Face Info : ", dFace )
+
+# check for similarities between faces in images within this batch
+# list must be passed to similarity method for faces to compare against ( face_ids )
+for singleFace in facesDetected.keys() :
 
     # pass
+    # print( singleFace )
+    facesToCompare.append( singleFace )
+    
+for faceX in facesToCompare :
+    
+    # print( "Faces to Compare : ", facesToCompare )
+    # print( "Attempting to Remove : ", faceX )
 
-    facesToCompare = facesDetected.pop( singleFace )
+    xCompareFaces = facesToCompare.copy()
+    xCompareFaces.remove( faceX )
+    
+    # print( facesToCompare )
+    # print( xCompareFaces )
 
     # complete similarity check
-    similarFaces = faceClient.face.find_similar( singleFace, facesToCompare )
+    # face list cant be empty
+    similarFaces = faceClient.face.find_similar( face_id = faceX, face_ids = xCompareFaces )
 
     if similarFaces :
 
         # pass
         print( "Similar faces detected..." )
+        # print( similarFaces )
 
-        for simiarFace in similarFaces :
-
-            # if any matches are detected :
-            #   a. check for an existing FaceGroup with a potential match
-            #   b. if no FaceGroups exist with potential match, create new FaceGroup with detected matches
-            pass
-        
+    #####################################################################################################
+    # regardless if any similar matches are detected :                                                  #
+    #   a. loop through existing PersonGroup(s) for a potential match                                   #
+    #   b. if no PersonGroups exist with potential match, create new FaceGroup with detected face id    #
+    #####################################################################################################
             
+    # pass
 
-    else :
+    # counter variable to track the number of times an image was identified
+    # based on an existing PersonGroup or LargePersonGroup
+    addedToGroup = 0
 
-        print( "No matches detected..." )
+    if len( combinedFaceGroups ) > 0 :         
+            
+        for facegroup in combinedFaceGroups :
+            
+            singleFaceList = []            
+            singleFaceList.append( faceX )
+                
+            faceMatches = faceClient.face.identify( singleFaceList, person_group_id = facegroup, recognition_model = "recognition_04" )
+                
+            # print( faceMatches )
+                
+            for match in faceMatches :
+                    
+                # print( "Matches : ", match )
+                    
+                if len( match.candidates ) > 0 :
+                    
+                    for candidate in match.candidates :
+                        
+                        # print( candidate )
+                        # grab person_id and confidence for adding to group below
+                    
+                        # pass
+                        matchingPersonId = candidate.person_id
+                        
+                        if candidate.confidence >= .60 :
+        
+                            # add Sas Key to URL string - prevent 409 error
+                            uploadUrl = facesDetected[ faceX ][ "URL" ] + saSasKey
+                
+                            # add identified image to matching PersonGroup
+                    
+                            faceClient.person_group_person.add_face_from_url(
+                                person_group_id = facegroup, 
+                                person_id = matchingPersonId, 
+                                url = uploadUrl
+                                )
+                    
+                            # train the persongroup after addition
+                            faceClient.person_group.train( person_group_id = facegroup )
 
-    # empty list and start over
-    facesToCompare = []
+                            # check to ensure training completion before moving on
+                            while ( True ) :
+
+                                groupStatus = faceClient.person_group.get_training_status( facegroup )
+
+                                print( "Current Group Training Status :", groupStatus.status )
+
+                                if ( groupStatus.status is TrainingStatusType.succeeded ) :
+
+                                    print( "Person Group Training has completed." )
+
+                                    break
+                    
+                                elif ( groupStatus.status is TrainingStatusType.failed ) :
+
+                                    faceClient.person_group.delete( facegroup )
+
+                                    sys.exit( "Person Group Training has failed." )
+
+                                    # wait 5 seconds before checking again
+                                    time.sleep( 5 )
+                    
+                            addedToGroup += 1
+                            
+                        else :
+                            
+                            print( "Confidence score on match was below 60% threshold..." )
+                    
+    if addedToGroup == 0 or len( combinedFaceGroups ) == 0 :
+                
+        # pass
+    
+        print( "Creating PersonGroup for : ", faceX )
+            
+        # create new FaceGroup for image
+        faceGroupId = str( uuid.uuid4() )
+        faceGroupName = "persongroup" + faceGroupId
+                
+        faceClient.person_group.create( person_group_id = faceGroupId, name = faceGroupName, recognition_model = "recognition_04" )
+                
+        # add newly identified face to new face group
+        try :
+            
+            newPersonId = fnCreatePersonID()
+        
+            personCreated = faceClient.person_group_person.create( person_group_id = faceGroupId,
+                                                           name = newPersonId
+                                                           )
+        
+            # add Sas Key to URL string - prevent 409 error
+            uploadUrl = facesDetected[ faceX ][ "URL" ] + saSasKey
+                
+            faceClient.person_group_person.add_face_from_url( person_group_id = faceGroupId, 
+                                                                  person_id = personCreated.person_id, 
+                                                                  url = uploadUrl
+                                                                  )        
+                
+            # train the persongroup after addition
+            faceClient.person_group.train( person_group_id = faceGroupId )
+
+            # check to ensure training completion before moving on
+            while ( True ) :
+
+                groupStatus = faceClient.person_group.get_training_status( faceGroupId )
+
+                print( "Current Group Training Status :", groupStatus.status )
+
+                if ( groupStatus.status is TrainingStatusType.succeeded ) :
+
+                    print( "Person Group Training has completed." )
+
+                    break
+                
+                elif ( groupStatus.status is TrainingStatusType.failed ) :
+
+                    faceClient.person_group.delete( faceGroupId )
+
+                    sys.exit( "Person Group Training has failed." )
+
+                    # wait 5 seconds before checking again
+                    time.sleep( 5 )
+                    
+            # update PersonGroup list variable
+            listFaceGroups = faceClient.person_group.list()
+
+            for fg in listFaceGroups :
+                
+                combinedFaceGroups.append( fg.person_group_id )
+                    
+        except Exception as Ex :
+            
+            print( "Exception Generated: ", Ex )
+            print( "" )
+            
+            break
+
+    """else :
+
+        print( "No matches detected..." )"""
+        
+# Summary for Objects Created
+print( "Summary of Person Group(s) Created : " )
+for group in faceClient.person_group.list() :
+    
+    print( "Existing Person Group ID:", group.person_group_id, ", Name : ", group.name )
+    
+    for logicalPerson in faceClient.person_group_person.list( person_group_id = group.person_group_id ) :
+        
+        print( "Existing Logical Person ID : ", logicalPerson.person_id, ", Name : ", logicalPerson.name )
+        # print( logicalPerson )
