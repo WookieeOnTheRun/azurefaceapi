@@ -26,7 +26,7 @@ cogSvcSubKey = ""
 saUrl = ""
 saContainer = "images"
 
-# SAS expires in 30 days from creation ( expiration date : 23-Nov-2022 )
+# SAS Token
 saSasKey = ""
 
 # first pass of images to match - list of face id's
@@ -270,44 +270,61 @@ for faceX in facesToCompare :
                         matchingPersonId = candidate.person_id
                         
                         if candidate.confidence >= .60 :
-        
-                            # add Sas Key to URL string - prevent 409 error
-                            uploadUrl = facesDetected[ faceX ][ "URL" ] + saSasKey
-                
-                            # add identified image to matching PersonGroup
-                    
-                            faceClient.person_group_person.add_face_from_url(
-                                person_group_id = facegroup, 
-                                person_id = matchingPersonId, 
-                                url = uploadUrl
+                            
+                            # one more step - verification, just to make sure its the same person
+                            verifyFace = faceClient.face.verify_face_to_person(
+                                face_id = faceX ,
+                                person_id = matchingPersonId ,
+                                person_group_id = facegroup
                                 )
+                            
+                            # print( verifyFace )
+                            
+                            if verifyFace.is_identical and verifyFace.confidence >= .60 :
+        
+                                # add Sas Key to URL string - prevent 409 error
+                                uploadUrl = facesDetected[ faceX ][ "URL" ] + saSasKey
+                
+                                # add identified image to matching PersonGroup
                     
-                            # train the persongroup after addition
-                            faceClient.person_group.train( person_group_id = facegroup )
-
-                            # check to ensure training completion before moving on
-                            while ( True ) :
-
-                                groupStatus = faceClient.person_group.get_training_status( facegroup )
-
-                                print( "Current Group Training Status :", groupStatus.status )
-
-                                if ( groupStatus.status is TrainingStatusType.succeeded ) :
-
-                                    print( "Person Group Training has completed." )
-
-                                    break
+                                faceClient.person_group_person.add_face_from_url(
+                                    person_group_id = facegroup, 
+                                    person_id = matchingPersonId, 
+                                    url = uploadUrl
+                                    )
                     
-                                elif ( groupStatus.status is TrainingStatusType.failed ) :
+                                # train the persongroup after addition
+                                faceClient.person_group.train( person_group_id = facegroup )
 
-                                    faceClient.person_group.delete( facegroup )
+                                # check to ensure training completion before moving on
+                                while ( True ) :
 
-                                    sys.exit( "Person Group Training has failed." )
+                                    groupStatus = faceClient.person_group.get_training_status( facegroup )
 
-                                    # wait 5 seconds before checking again
-                                    time.sleep( 5 )
+                                    print( "Current Group Training Status :", groupStatus.status )
+
+                                    if ( groupStatus.status is TrainingStatusType.succeeded ) :
+
+                                        print( "Person Group Training has completed." )
+                                        
+                                        addedToGroup += 1
+
+                                        break
                     
-                            addedToGroup += 1
+                                    elif ( groupStatus.status is TrainingStatusType.failed ) :
+
+                                        faceClient.person_group.delete( facegroup )
+
+                                        sys.exit( "Person Group Training has failed." )
+
+                                        # wait 5 seconds before checking again
+                                        time.sleep( 5 )                                
+                                        
+                            else :
+                                
+                                print( "Face Vertification failed or is not highly confident..." )
+                                
+                                break                            
                             
                         else :
                             
