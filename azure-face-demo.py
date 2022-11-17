@@ -26,7 +26,7 @@ cogSvcSubKey = ""
 saUrl = ""
 saContainer = "images"
 
-# SAS Token
+# SAS expires in 30 days from creation ( expiration date : 23-Nov-2022 )
 saSasKey = ""
 
 # first pass of images to match - list of face id's
@@ -412,3 +412,15 @@ for group in faceClient.person_group.list() :
         
         print( "Existing Logical Person ID : ", logicalPerson.person_id, ", Name : ", logicalPerson.name )
         # print( logicalPerson )
+        
+        """
+        for faceList in logicalPerson.persisted_faceIds :
+            
+            faceInfo = faceClient.person_group_person.get_face(
+                person_group_id = group.person_group_id , 
+                person_id = logicalPerson.person_id , 
+                persisted_face_id = faceList.persisted_face_id
+                )
+            
+            print( "Face Id : ", faceList.persisted_face_id, ", Face User Data : ", faceInfo.userData )
+        """
