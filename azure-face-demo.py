@@ -24,9 +24,9 @@ cogSvcEndpoint = ""
 cogSvcSubKey = ""
 
 saUrl = ""
-saContainer = "images"
+saContainer = ""
 
-# SAS expires in 30 days from creation ( expiration date : 23-Nov-2022 )
+# SAS expires in 30 days from creation ( expiration date : 01-Mar-2023 )
 saSasKey = ""
 
 # first pass of images to match - list of face id's
