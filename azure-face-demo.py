@@ -26,7 +26,7 @@ cogSvcSubKey = ""
 saUrl = ""
 saContainer = ""
 
-# SAS expires in 30 days from creation ( expiration date : 01-Mar-2023 )
+# SAS Token for connectivity to Storage Account
 saSasKey = ""
 
 # first pass of images to match - list of face id's
